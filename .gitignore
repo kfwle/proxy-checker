@@ -1,0 +1,7 @@
+node_modules/
+dist/
+bin/
+cores/
+cmd/checker/dist/
+data/
+results/

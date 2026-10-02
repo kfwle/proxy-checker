@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-stone-100 text-stone-900 antialiased;
+}
+.dark body, .dark {
+  @apply bg-stone-950 text-stone-100;
+}
