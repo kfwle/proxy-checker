@@ -26,6 +26,7 @@ export type CoreInfo = {
 export type SpeedResult = {
   ok: boolean
   core?: string
+  server?: string
   downMbps?: number
   upMbps?: number
   downMb?: number
@@ -33,6 +34,13 @@ export type SpeedResult = {
   latencyMs?: number
   error?: string
   upError?: string
+}
+
+export type SpeedServer = {
+  id: string
+  name: string
+  region: string
+  upload: boolean
 }
 
 export type UnlockService = {

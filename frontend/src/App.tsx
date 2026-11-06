@@ -3,11 +3,13 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Play, Square, Trash2, Download, Copy,
   Cpu, RefreshCw, Settings2, Moon, Sun, Zap, Filter, FlaskConical, Image,
+  Gauge, Globe, Shield,
 } from 'lucide-react'
 import { ResultRow } from './report'
 import TestPage from './TestPage'
 import TracePage from './TracePage'
 import DNSPage from './DNSPage'
+import { SpeedPage, UnlockPage, IpPage } from './QualityPages'
 import type { CheckResult, CoreInfo } from './types'
 
 const PROTO_LIST = [
@@ -25,6 +27,18 @@ function loadLS(key: string, fallback: string[]): string[] {
     if (Array.isArray(v)) return v.filter((x) => typeof x === 'string')
   } catch {}
   return fallback
+}
+
+function tabFromPath(path: string): string {
+  switch (path) {
+    case '/test': return 'test'
+    case '/dns': return 'dns'
+    case '/trace': return 'trace'
+    case '/speed': return 'speed'
+    case '/unlock': return 'unlock'
+    case '/ip': return 'ip'
+    default: return 'home'
+  }
 }
 
 export default function App() {
@@ -318,17 +332,17 @@ export default function App() {
   }
 
   const pct = progress.total ? Math.round((progress.done / progress.total) * 100) : 0
-  const [tab, setTab] = useState<string>(() => (typeof location !== 'undefined' && location.pathname === '/trace' ? 'trace' : location.pathname === '/dns' ? 'dns' : location.pathname === '/test' ? 'test' : 'home'))
+  const [tab, setTab] = useState<string>(() => tabFromPath(typeof location !== 'undefined' ? location.pathname : '/'))
 
   function go(t: string) {
     setTab(t)
     try {
-      history.pushState(null, '', t === 'test' ? '/test' : t === 'dns' ? '/dns' : t === 'trace' ? '/trace' : '/')
+      history.pushState(null, '', t === 'home' ? '/' : '/' + t)
     } catch {}
   }
 
   useEffect(() => {
-    const onPop = () => setTab(location.pathname === '/trace' ? 'trace' : location.pathname === '/dns' ? 'dns' : location.pathname === '/test' ? 'test' : 'home')
+    const onPop = () => setTab(tabFromPath(location.pathname))
     addEventListener('popstate', onPop)
     return () => removeEventListener('popstate', onPop)
   }, [])
@@ -344,7 +358,7 @@ export default function App() {
             <h1 className="font-semibold leading-tight">Proxy Checker</h1>
             <p className="text-xs text-stone-500">vless · vmess · ss · trojan · hysteria · tuic · naive · mtproto · socks · http</p>
           </div>
-          <nav className="ml-4 flex gap-1 text-sm">
+          <nav className="ml-4 flex flex-wrap items-center gap-1 text-sm">
             <button onClick={() => go('home')} className={`px-3 py-1.5 rounded-xl ${tab === 'home' ? 'bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900' : 'hover:bg-stone-200 dark:hover:bg-stone-800'}`}>
               Чекер
             </button>
@@ -356,6 +370,15 @@ export default function App() {
             </button>
             <button onClick={() => go('trace')} className={`px-3 py-1.5 rounded-xl ${tab === 'trace' ? 'bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900' : 'hover:bg-stone-200 dark:hover:bg-stone-800'}`}>
               Трейс
+            </button>
+            <button onClick={() => go('speed')} className={`px-3 py-1.5 rounded-xl flex items-center gap-1.5 ${tab === 'speed' ? 'bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900' : 'hover:bg-stone-200 dark:hover:bg-stone-800'}`}>
+              <Gauge size={15} /> Скорость
+            </button>
+            <button onClick={() => go('unlock')} className={`px-3 py-1.5 rounded-xl flex items-center gap-1.5 ${tab === 'unlock' ? 'bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900' : 'hover:bg-stone-200 dark:hover:bg-stone-800'}`}>
+              <Globe size={15} /> Unlock
+            </button>
+            <button onClick={() => go('ip')} className={`px-3 py-1.5 rounded-xl flex items-center gap-1.5 ${tab === 'ip' ? 'bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900' : 'hover:bg-stone-200 dark:hover:bg-stone-800'}`}>
+              <Shield size={15} /> IP
             </button>
           </nav>
           <div className="ml-auto flex items-center gap-2">
@@ -382,7 +405,7 @@ export default function App() {
           </motion.div>
         )}</AnimatePresence>
 
-        {tab === 'test' ? <TestPage hasToken={twoip.hasToken} showToast={showToast} /> : tab === 'dns' ? <DNSPage showToast={showToast} /> : tab === 'trace' ? <TracePage /> : (<>
+        {tab === 'test' ? <TestPage hasToken={twoip.hasToken} showToast={showToast} /> : tab === 'dns' ? <DNSPage showToast={showToast} /> : tab === 'trace' ? <TracePage /> : tab === 'speed' ? <SpeedPage /> : tab === 'unlock' ? <UnlockPage /> : tab === 'ip' ? <IpPage /> : (<>
         {showSettings && (
           <motion.section initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="rounded-2xl border border-stone-200 dark:border-stone-800 bg-white dark:bg-stone-900 p-4 grid gap-3 md:grid-cols-4">
             <label className="grid gap-1 text-sm">Параллельно

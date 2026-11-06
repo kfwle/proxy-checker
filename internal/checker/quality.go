@@ -30,7 +30,11 @@ type Tunnel struct {
 }
 
 // OpenTunnel поднимает туннель под ссылку тем же ядром, что и обычная проверка.
+// Пустая ссылка = без прокси (прямой замер с этой машины).
 func OpenTunnel(ctx context.Context, link string, startup time.Duration) (*Tunnel, string) {
+	if strings.TrimSpace(link) == "" {
+		return &Tunnel{Core: "local", proxies: []*url.URL{nil}, cleanup: func() {}}, ""
+	}
 	proto := DetectProtocol(link)
 	if proto == "mtproto" {
 		return nil, "mtproto-checker не отдаёт локальный socks — скорость/unlock для tg-ссылок недоступны"
@@ -194,6 +198,10 @@ func (t *Tunnel) download(ctx context.Context, target string, limit int64, timeo
 		if err != nil {
 			return 0, 0, err.Error()
 		}
+		if limit > 0 {
+			// просим ровно limit байт, чтобы не тянуть весь 100-МБ файл
+			req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", limit-1))
+		}
 		c := t.client(pu, timeout)
 		start := time.Now()
 		resp, err := c.Do(req)
@@ -253,10 +261,50 @@ func (t *Tunnel) upload(ctx context.Context, target string, size int64, timeout 
 	return 0, 0, lastErr
 }
 
+// SpeedServer — публичная точка замера скорости.
+type SpeedServer struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Region string `json:"region"`
+	Upload bool   `json:"upload"`
+	down   string
+	up     string
+	fmtURL bool
+}
+
+var speedServers = []SpeedServer{
+	{ID: "cloudflare", Name: "Cloudflare", Region: "global", Upload: true,
+		down: "https://speed.cloudflare.com/__down?bytes=%d", up: "https://speed.cloudflare.com/__up", fmtURL: true},
+	{ID: "ovh", Name: "OVH", Region: "EU · Франция", down: "https://proof.ovh.net/files/100Mb.dat"},
+	{ID: "cachefly", Name: "CacheFly", Region: "CDN · global", down: "https://cachefly.cachefly.net/10mb.test"},
+	{ID: "tele2", Name: "Tele2", Region: "EU · Швеция", down: "http://speedtest.tele2.net/100MB.zip"},
+	{ID: "vultr-nj", Name: "Vultr", Region: "US · Нью-Джерси", down: "https://nj-us-ping.vultr.com/vultr.com.100MB.bin"},
+	{ID: "vultr-sgp", Name: "Vultr", Region: "Asia · Сингапур", down: "https://sgp-ping.vultr.com/vultr.com.100MB.bin"},
+	{ID: "yandex", Name: "Yandex Mirror", Region: "RU · Москва",
+		down: "https://mirror.yandex.ru/debian/dists/stable/main/installer-amd64/current/images/netboot/mini.iso"},
+}
+
+// SpeedServers — каталог серверов для UI.
+func SpeedServers() []SpeedServer {
+	out := make([]SpeedServer, len(speedServers))
+	copy(out, speedServers)
+	return out
+}
+
+func findSpeedServer(id string) *SpeedServer {
+	for i := range speedServers {
+		if speedServers[i].ID == id {
+			return &speedServers[i]
+		}
+	}
+	return nil
+}
+
 // SpeedResult — замер скорости через прокси.
 type SpeedResult struct {
 	OK        bool    `json:"ok"`
 	Core      string  `json:"core,omitempty"`
+	Server    string  `json:"server,omitempty"`
 	DownMbps  float64 `json:"downMbps"`
 	UpMbps    float64 `json:"upMbps"`
 	DownMb    float64 `json:"downMb"`
@@ -266,14 +314,8 @@ type SpeedResult struct {
 	UpError   string  `json:"upError,omitempty"`
 }
 
-const (
-	speedDownURL      = "https://speed.cloudflare.com/__down?bytes=%d"
-	speedDownFallback = "https://proof.ovh.net/files/10Mb.dat"
-	speedUpURL        = "https://speed.cloudflare.com/__up"
-)
-
-// SpeedTest качает/заливает данные через прокси и считает Mbps.
-func SpeedTest(ctx context.Context, link string, downBytes, upBytes int64) SpeedResult {
+// SpeedTest качает/заливает данные через прокси (link="" — напрямую) и считает Mbps.
+func SpeedTest(ctx context.Context, link, serverID string, downBytes, upBytes int64) SpeedResult {
 	if downBytes <= 0 {
 		downBytes = 20 << 20
 	}
@@ -289,7 +331,11 @@ func SpeedTest(ctx context.Context, link string, downBytes, upBytes int64) Speed
 	if upBytes > 50<<20 {
 		upBytes = 50 << 20
 	}
-	res := SpeedResult{}
+	srv := findSpeedServer(serverID)
+	if srv == nil {
+		srv = findSpeedServer("cloudflare")
+	}
+	res := SpeedResult{Server: srv.Name}
 	tun, errStr := OpenTunnel(ctx, link, 10*time.Second)
 	if errStr != "" {
 		res.Error = errStr
@@ -298,10 +344,14 @@ func SpeedTest(ctx context.Context, link string, downBytes, upBytes int64) Speed
 	defer tun.Close()
 	res.Core = tun.Core
 
-	n, elapsed, errStr := tun.download(ctx, fmt.Sprintf(speedDownURL, downBytes), downBytes, 90*time.Second)
-	if errStr != "" {
+	target := srv.down
+	if srv.fmtURL {
+		target = fmt.Sprintf(srv.down, downBytes)
+	}
+	n, elapsed, errStr := tun.download(ctx, target, downBytes, 90*time.Second)
+	if errStr != "" && srv.ID == "cloudflare" {
 		// запасной источник, если Cloudflare недоступен
-		n, elapsed, errStr = tun.download(ctx, speedDownFallback, downBytes, 90*time.Second)
+		n, elapsed, errStr = tun.download(ctx, "https://proof.ovh.net/files/10Mb.dat", downBytes, 90*time.Second)
 	}
 	if errStr != "" {
 		res.Error = "download: " + errStr
@@ -314,8 +364,9 @@ func SpeedTest(ctx context.Context, link string, downBytes, upBytes int64) Speed
 	}
 
 	if upBytes > 0 {
-		upN, upElapsed, upErr := tun.upload(ctx, speedUpURL, upBytes, 90*time.Second)
-		if upErr != "" {
+		if srv.up == "" {
+			res.UpError = "upload не поддерживается этим сервером"
+		} else if upN, upElapsed, upErr := tun.upload(ctx, srv.up, upBytes, 90*time.Second); upErr != "" {
 			res.UpError = upErr
 		} else {
 			res.UpMb = float64(upN) / (1 << 20)

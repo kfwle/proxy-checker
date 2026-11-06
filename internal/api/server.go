@@ -124,6 +124,7 @@ func (s *Server) Router() *mux.Router {
 	a.HandleFunc("/daily/run", s.handleDailyRun).Methods("POST")
 	a.HandleFunc("/exitip", s.handleExitIP).Methods("POST")
 	a.HandleFunc("/speed", s.handleSpeed).Methods("POST")
+	a.HandleFunc("/speed/servers", s.handleSpeedServers).Methods("GET")
 	a.HandleFunc("/unlock", s.handleUnlock).Methods("POST")
 	a.HandleFunc("/reputation", s.handleReputation).Methods("POST")
 	a.HandleFunc("/settings", s.handleSettingsGet).Methods("GET")
@@ -544,14 +545,11 @@ func (s *Server) handleExitIP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSpeed(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Link      string `json:"link"`
+		Server    string `json:"server"`
 		DownBytes int64  `json:"downBytes"`
 		UpBytes   int64  `json:"upBytes"`
 	}
 	if !decodeJSON(w, r, &req, 1<<20) {
-		return
-	}
-	if strings.TrimSpace(req.Link) == "" {
-		http.Error(w, "нужен link", 400)
 		return
 	}
 	if !acquireQuality(w) {
@@ -560,7 +558,11 @@ func (s *Server) handleSpeed(w http.ResponseWriter, r *http.Request) {
 	defer releaseQuality()
 	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
 	defer cancel()
-	writeJSON(w, checker.SpeedTest(ctx, req.Link, req.DownBytes, req.UpBytes))
+	writeJSON(w, checker.SpeedTest(ctx, req.Link, req.Server, req.DownBytes, req.UpBytes))
+}
+
+func (s *Server) handleSpeedServers(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, checker.SpeedServers())
 }
 
 func (s *Server) handleUnlock(w http.ResponseWriter, r *http.Request) {
@@ -569,10 +571,6 @@ func (s *Server) handleUnlock(w http.ResponseWriter, r *http.Request) {
 		TimeoutSec int    `json:"timeoutSec"`
 	}
 	if !decodeJSON(w, r, &req, 1<<20) {
-		return
-	}
-	if strings.TrimSpace(req.Link) == "" {
-		http.Error(w, "нужен link", 400)
 		return
 	}
 	if !acquireQuality(w) {
@@ -594,10 +592,6 @@ func (s *Server) handleReputation(w http.ResponseWriter, r *http.Request) {
 		TimeoutSec int    `json:"timeoutSec"`
 	}
 	if !decodeJSON(w, r, &req, 1<<20) {
-		return
-	}
-	if strings.TrimSpace(req.Link) == "" {
-		http.Error(w, "нужен link", 400)
 		return
 	}
 	if !acquireQuality(w) {
