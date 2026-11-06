@@ -1,7 +1,7 @@
 node_modules/
-dist/
-bin/
-cores/
+frontend/dist/
 cmd/checker/dist/
-data/
-results/
+/bin/
+/cores/
+/data/
+/results/
