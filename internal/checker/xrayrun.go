@@ -192,21 +192,31 @@ func checkViaXray(ctx context.Context, link, targetURL string, timeout time.Dura
 }
 
 func fetchViaXray(ctx context.Context, link, targetURL string, timeout time.Duration, discard bool) ([]byte, int64, string) {
+	port, cleanup, errStr := startXray(ctx, link, timeout)
+	if errStr != "" {
+		return nil, 0, errStr
+	}
+	defer cleanup()
+	return probeSocksURL(ctx, port, targetURL, timeout, !discard)
+}
+
+// startXray поднимает xray с socks-inbound и outbound из ссылки.
+func startXray(ctx context.Context, link string, timeout time.Duration) (int, func(), string) {
 	bin, ok := xrayBin()
 	if !ok {
-		return nil, 0, "ERR_NO_BINARY"
+		return 0, nil, "ERR_NO_BINARY"
 	}
 	pl, err := parseLink(link)
 	if err != nil {
-		return nil, 0, err.Error()
+		return 0, nil, err.Error()
 	}
 	outbound, err := buildXrayOutbound(pl)
 	if err != nil {
-		return nil, 0, err.Error()
+		return 0, nil, err.Error()
 	}
 	port, err := freePort()
 	if err != nil {
-		return nil, 0, err.Error()
+		return 0, nil, err.Error()
 	}
 	cfg := map[string]any{
 		"log":       map[string]any{"loglevel": "warning"},
@@ -215,35 +225,42 @@ func fetchViaXray(ctx context.Context, link, targetURL string, timeout time.Dura
 	}
 	tmp, err := os.CreateTemp("", "xray-*.json")
 	if err != nil {
-		return nil, 0, err.Error()
+		return 0, nil, err.Error()
 	}
-	defer os.Remove(tmp.Name())
 	_ = json.NewEncoder(tmp).Encode(cfg)
 	tmp.Close()
 
-	cctx, cancel := context.WithTimeout(ctx, timeout+15*time.Second)
-	defer cancel()
+	cctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(cctx, bin, "run", "-c", tmp.Name())
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	cmd.Stdout = io.Discard
 	if err := cmd.Start(); err != nil {
-		return nil, 0, err.Error()
+		cancel()
+		os.Remove(tmp.Name())
+		return 0, nil, err.Error()
 	}
 	exited := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
 		close(exited)
 	}()
-	defer func() {
+	cleanup := func() {
 		_ = cmd.Process.Kill()
 		<-exited
-	}()
+		cancel()
+		os.Remove(tmp.Name())
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		select {
 		case <-exited:
-			return nil, 0, "xray упал на старте: " + lastLines(stderr.String(), 3)
+			msg := strings.TrimSpace(stderr.String())
+			cleanup()
+			if msg != "" {
+				return 0, nil, "xray упал на старте: " + lastLines(msg, 3)
+			}
+			return 0, nil, "xray упал на старте"
 		default:
 		}
 		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
@@ -254,12 +271,14 @@ func fetchViaXray(ctx context.Context, link, targetURL string, timeout time.Dura
 		if time.Now().After(deadline) {
 			_ = cmd.Process.Kill()
 			<-exited
-			if s := strings.TrimSpace(stderr.String()); s != "" {
-				return nil, 0, "xray inbound не поднялся: " + lastLines(s, 3)
+			msg := strings.TrimSpace(stderr.String())
+			cleanup()
+			if msg != "" {
+				return 0, nil, "xray inbound не поднялся: " + lastLines(msg, 3)
 			}
-			return nil, 0, "xray inbound не поднялся за 10с"
+			return 0, nil, "xray inbound не поднялся за 10с"
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	return probeSocksURL(cctx, port, targetURL, timeout, !discard)
+	return port, cleanup, ""
 }

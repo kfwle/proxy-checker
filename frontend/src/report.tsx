@@ -1,8 +1,8 @@
 import { useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CheckCircle2, XCircle, Radar, ChevronDown, SlidersHorizontal } from 'lucide-react'
+import { CheckCircle2, XCircle, Radar, ChevronDown, SlidersHorizontal, Gauge, Shield, Globe, Loader2 } from 'lucide-react'
 import RussiaMap, { groupByGeo, rankVerdict } from './RussiaMap'
-import type { CheckResult } from './types'
+import type { CheckResult, SpeedResult, UnlockResult, ReputationResult } from './types'
 
 export function stripHost(hostPort: string): string {
   return hostPort.includes('://') ? hostPort : hostPort.split(':')[0] || hostPort
@@ -516,6 +516,7 @@ function ExtTypeRow({ t, c, ccOk }: { t: string; c: NonNullable<ExtChecks[string
 
 export function ResultRow({ r, hasToken }: { r: CheckResult; hasToken: boolean }) {
   const f = useFullReport(r.host, r.link, 8)
+  const [qOpen, setQOpen] = useState(false)
   const rk = f.rk
   const badge = rk && !rk.loading && rk.blocked !== undefined
     ? rk.blocked
@@ -540,13 +541,136 @@ export function ResultRow({ r, hasToken }: { r: CheckResult; hasToken: boolean }
             <Radar size={14} /> Всё сразу
           </button>
         )}
+        <button onClick={() => setQOpen(!qOpen)} title="Скорость, unlock сервисов и репутация exit-IP через этот прокси"
+          className={`px-2.5 py-1.5 rounded-lg border flex items-center gap-1.5 shrink-0 text-xs ${qOpen ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-200' : 'border-stone-300 dark:border-stone-700 hover:bg-stone-100 dark:hover:bg-stone-800'}`}>
+          <Gauge size={14} /> Качество
+        </button>
       </div>
+      {qOpen && <QualityPanel link={r.link} />}
       {hasFull && (
         <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }}
           transition={{ duration: 0.35, ease: 'easeInOut' }} className="overflow-hidden">
           <FullPanel r={r} f={f} hasToken={hasToken} />
         </motion.div>
       )}
+    </div>
+  )
+}
+
+export function QualityPanel({ link }: { link: string }) {
+  const [speed, setSpeed] = useState<SpeedResult | null>(null)
+  const [unlock, setUnlock] = useState<UnlockResult | null>(null)
+  const [rep, setRep] = useState<ReputationResult | null>(null)
+  const [busy, setBusy] = useState<{ speed?: boolean; unlock?: boolean; rep?: boolean }>({})
+  const [showLists, setShowLists] = useState(false)
+
+  async function call(kind: 'speed' | 'unlock' | 'rep') {
+    setBusy((b) => ({ ...b, [kind]: true }))
+    try {
+      const url = kind === 'speed' ? '/api/speed' : kind === 'unlock' ? '/api/unlock' : '/api/reputation'
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ link }) })
+      const data = await r.json()
+      if (kind === 'speed') setSpeed(data)
+      else if (kind === 'unlock') setUnlock(data)
+      else setRep(data)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      if (kind === 'speed') setSpeed({ ok: false, error: msg })
+      else if (kind === 'unlock') setUnlock({ ok: false, error: msg })
+      else setRep({ ok: false, error: msg })
+    } finally {
+      setBusy((b) => ({ ...b, [kind]: false }))
+    }
+  }
+
+  function runAll() {
+    void Promise.all([call('speed'), call('unlock'), call('rep')])
+  }
+
+  const anyBusy = !!(busy.speed || busy.unlock || busy.rep)
+  const unlockColor = (s: string) => s === 'yes' ? 'text-emerald-600 dark:text-emerald-400' : s === 'no' ? 'text-red-500' : s === 'unknown' ? 'text-stone-500' : 'text-amber-600'
+  const unlockLabel = (s: string) => s === 'yes' ? 'доступно' : s === 'no' ? 'нет' : s === 'unknown' ? '?' : 'ошибка'
+
+  return (
+    <div className="rounded-xl border border-stone-200 dark:border-stone-800 bg-stone-50/60 dark:bg-stone-950/40 p-3 grid gap-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        <button onClick={runAll} disabled={anyBusy}
+          className="text-xs px-2.5 py-1 rounded-lg bg-stone-900 dark:bg-stone-100 text-white dark:text-stone-900 disabled:opacity-50 flex items-center gap-1">
+          {anyBusy && <Loader2 size={12} className="animate-spin" />} Проверить всё
+        </button>
+        <span className="text-[11px] text-stone-500">скорость, unlock и репутация — через сам прокси</span>
+      </div>
+      <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-1.5 content-start">
+          <div className="flex items-center gap-1.5 text-[10px] font-semibold tracking-wide text-stone-500"><Gauge size={12} /> СКОРОСТЬ</div>
+          {busy.speed ? (
+            <span className="text-xs text-stone-500 flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> замер…</span>
+          ) : speed ? (
+            speed.ok ? (
+              <div className="text-xs font-mono grid gap-0.5">
+                <div className="text-emerald-600 dark:text-emerald-400">↓ {(speed.downMbps ?? 0).toFixed(1)} Mbps</div>
+                {(speed.upMbps ?? 0) > 0 && <div className="text-emerald-600 dark:text-emerald-400">↑ {(speed.upMbps ?? 0).toFixed(1)} Mbps</div>}
+                <div className="text-stone-500 text-[10px]">{(speed.downMb ?? 0).toFixed(1)} МБ · {speed.latencyMs ?? 0} мс · {speed.core}</div>
+                {speed.upError && <div className="text-amber-600 text-[10px]" title={speed.upError}>upload: ошибка</div>}
+              </div>
+            ) : <span className="text-xs text-red-500" title={speed.error}>{speed.error}</span>
+          ) : <span className="text-xs text-stone-400">не замерялось</span>}
+          <button onClick={() => call('speed')} disabled={!!busy.speed} className="text-[11px] text-left text-stone-500 underline">замерить скорость</button>
+        </div>
+
+        <div className="grid gap-1.5 content-start">
+          <div className="flex items-center gap-1.5 text-[10px] font-semibold tracking-wide text-stone-500"><Globe size={12} /> UNLOCK</div>
+          {busy.unlock ? (
+            <span className="text-xs text-stone-500 flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> проверка…</span>
+          ) : unlock ? (
+            unlock.ok ? (
+              <div className="grid gap-0.5">
+                {(unlock.services ?? []).map((s) => (
+                  <div key={s.id} className="flex items-center gap-1.5 text-xs">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${s.status === 'yes' ? 'bg-emerald-500' : s.status === 'no' ? 'bg-red-500' : s.status === 'unknown' ? 'bg-stone-400' : 'bg-amber-500'}`} />
+                    <span className="flex-1 truncate">{s.name}</span>
+                    {s.region && <span className="font-mono text-[10px] text-stone-500">{s.region}</span>}
+                    <span className={`text-[10px] shrink-0 ${unlockColor(s.status)}`} title={s.detail}>{unlockLabel(s.status)}</span>
+                  </div>
+                ))}
+              </div>
+            ) : <span className="text-xs text-red-500" title={unlock.error}>{unlock.error}</span>
+          ) : <span className="text-xs text-stone-400">не проверялось</span>}
+          <button onClick={() => call('unlock')} disabled={!!busy.unlock} className="text-[11px] text-left text-stone-500 underline">проверить сервисы</button>
+        </div>
+
+        <div className="grid gap-1.5 content-start">
+          <div className="flex items-center gap-1.5 text-[10px] font-semibold tracking-wide text-stone-500"><Shield size={12} /> IP / DNSBL</div>
+          {busy.rep ? (
+            <span className="text-xs text-stone-500 flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> проверка…</span>
+          ) : rep ? (
+            rep.ok ? (
+              <div className="text-xs grid gap-0.5">
+                <div className="font-mono truncate">{rep.exitIp} <span className="text-stone-500">{rep.country}</span></div>
+                {rep.asn && <div className="text-[10px] text-stone-500 truncate" title={rep.asn}>{rep.asn}</div>}
+                <div className={rep.listed ? 'text-red-500' : 'text-emerald-600 dark:text-emerald-400'}>
+                  {rep.listed ? `в блэклистах: ${rep.listed}` : 'в DNSBL чист'}
+                </div>
+                {(rep.lists ?? []).length > 0 && (
+                  <button onClick={() => setShowLists(!showLists)} className="text-[10px] underline text-stone-500 text-left">списки</button>
+                )}
+                {showLists && (
+                  <div className="grid gap-0.5">
+                    {(rep.lists ?? []).map((l) => (
+                      <div key={l.zone} className="flex items-center gap-1 text-[10px]">
+                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${l.status === 'listed' ? 'bg-red-500' : l.status === 'clean' ? 'bg-emerald-500' : 'bg-stone-400'}`} />
+                        <span className="truncate flex-1">{l.name}</span>
+                        <span className="text-stone-500" title={l.detail}>{l.status}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : <span className="text-xs text-red-500" title={rep.error}>{rep.error}</span>
+          ) : <span className="text-xs text-stone-400">не проверялось</span>}
+          <button onClick={() => call('rep')} disabled={!!busy.rep} className="text-[11px] text-left text-stone-500 underline">проверить IP</button>
+        </div>
+      </div>
     </div>
   )
 }

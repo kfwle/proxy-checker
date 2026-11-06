@@ -38,6 +38,22 @@ type Server struct {
 	jobs map[string]*checkJob
 }
 
+// qualitySem ограничивает одновременные speed/unlock/reputation:
+// каждая проверка поднимает отдельное ядро.
+var qualitySem = make(chan struct{}, 4)
+
+func acquireQuality(w http.ResponseWriter) bool {
+	select {
+	case qualitySem <- struct{}{}:
+		return true
+	default:
+		http.Error(w, "уже идут 4 проверки качества — подождите", http.StatusTooManyRequests)
+		return false
+	}
+}
+
+func releaseQuality() { <-qualitySem }
+
 func New() *Server {
 	s := &Server{jobs: map[string]*checkJob{}}
 	go s.sweepLoop()
@@ -73,12 +89,12 @@ func (s *Server) sweepLoop() {
 			delete(s.jobs, oldest)
 		}
 		s.mu.Unlock()
-		checkhost.Sweep(60 * time.Minute, 50)
-		probe.Sweep(60 * time.Minute, 50)
-		gping.Sweep(60 * time.Minute, 50)
-		keyping.Sweep(60 * time.Minute, 50)
-		dnscomp.Sweep(60 * time.Minute, 50)
-		trace.Sweep(60 * time.Minute, 50)
+		checkhost.Sweep(60*time.Minute, 50)
+		probe.Sweep(60*time.Minute, 50)
+		gping.Sweep(60*time.Minute, 50)
+		keyping.Sweep(60*time.Minute, 50)
+		dnscomp.Sweep(60*time.Minute, 50)
+		trace.Sweep(60*time.Minute, 50)
 	}
 }
 
@@ -107,6 +123,9 @@ func (s *Server) Router() *mux.Router {
 	a.HandleFunc("/daily", s.handleDailySet).Methods("POST")
 	a.HandleFunc("/daily/run", s.handleDailyRun).Methods("POST")
 	a.HandleFunc("/exitip", s.handleExitIP).Methods("POST")
+	a.HandleFunc("/speed", s.handleSpeed).Methods("POST")
+	a.HandleFunc("/unlock", s.handleUnlock).Methods("POST")
+	a.HandleFunc("/reputation", s.handleReputation).Methods("POST")
 	a.HandleFunc("/settings", s.handleSettingsGet).Methods("GET")
 	a.HandleFunc("/settings", s.handleSettingsSet).Methods("POST")
 	a.HandleFunc("/twoip/abuse", s.handleTwoipAbuse).Methods("GET")
@@ -206,11 +225,11 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	}
 	j := e.job
 	j2 := struct {
-		ID      string             `json:"id"`
-		Done    int                `json:"done"`
-		Total   int                `json:"total"`
-		Results []checker.Result   `json:"results"`
-		Finish  bool               `json:"finished"`
+		ID      string              `json:"id"`
+		Done    int                 `json:"done"`
+		Total   int                 `json:"total"`
+		Results []checker.Result    `json:"results"`
+		Finish  bool                `json:"finished"`
 		Saved   []checker.SavedFile `json:"saved,omitempty"`
 	}{ID: j.ID, Done: jobDone(j), Total: j.Total, Results: jobResults(j), Finish: jobFinished(j), Saved: j.SavedFiles()}
 	writeJSON(w, j2)
@@ -220,7 +239,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	id := mux.Vars(r)["id"]
 	s.mu.Lock()
 	e, ok := s.jobs[id]
-	if (ok) {
+	if ok {
 		e.cancel()
 	}
 	delete(s.jobs, id)
@@ -487,7 +506,8 @@ func (s *Server) handleDailySet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, daily.SetEnabled(req.Enabled))
 }
 
-func (s *Server) handleDailyRun(w http.ResponseWriter, r *http.Request) {	var req struct {
+func (s *Server) handleDailyRun(w http.ResponseWriter, r *http.Request) {
+	var req struct {
 		Limit int `json:"limit"`
 	}
 	if !decodeJSON(w, r, &req, 1<<20) {
@@ -519,6 +539,78 @@ func (s *Server) handleExitIP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), timeout+20*time.Second)
 	defer cancel()
 	writeJSON(w, checker.ExitIP(ctx, req.Link, timeout))
+}
+
+func (s *Server) handleSpeed(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Link      string `json:"link"`
+		DownBytes int64  `json:"downBytes"`
+		UpBytes   int64  `json:"upBytes"`
+	}
+	if !decodeJSON(w, r, &req, 1<<20) {
+		return
+	}
+	if strings.TrimSpace(req.Link) == "" {
+		http.Error(w, "нужен link", 400)
+		return
+	}
+	if !acquireQuality(w) {
+		return
+	}
+	defer releaseQuality()
+	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
+	defer cancel()
+	writeJSON(w, checker.SpeedTest(ctx, req.Link, req.DownBytes, req.UpBytes))
+}
+
+func (s *Server) handleUnlock(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Link       string `json:"link"`
+		TimeoutSec int    `json:"timeoutSec"`
+	}
+	if !decodeJSON(w, r, &req, 1<<20) {
+		return
+	}
+	if strings.TrimSpace(req.Link) == "" {
+		http.Error(w, "нужен link", 400)
+		return
+	}
+	if !acquireQuality(w) {
+		return
+	}
+	defer releaseQuality()
+	timeout := time.Duration(req.TimeoutSec) * time.Second
+	if timeout <= 0 || timeout > 20*time.Second {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout+30*time.Second)
+	defer cancel()
+	writeJSON(w, checker.UnlockTest(ctx, req.Link, timeout))
+}
+
+func (s *Server) handleReputation(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Link       string `json:"link"`
+		TimeoutSec int    `json:"timeoutSec"`
+	}
+	if !decodeJSON(w, r, &req, 1<<20) {
+		return
+	}
+	if strings.TrimSpace(req.Link) == "" {
+		http.Error(w, "нужен link", 400)
+		return
+	}
+	if !acquireQuality(w) {
+		return
+	}
+	defer releaseQuality()
+	timeout := time.Duration(req.TimeoutSec) * time.Second
+	if timeout <= 0 || timeout > 30*time.Second {
+		timeout = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout+40*time.Second)
+	defer cancel()
+	writeJSON(w, checker.Reputation(ctx, req.Link, timeout))
 }
 
 func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
@@ -669,7 +761,8 @@ func (s *Server) handleTraceStart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"id": j.ID, "target": j.Target})
 }
 
-func (s *Server) handleTraceJob(w http.ResponseWriter, r *http.Request) {	j, ok := trace.GetJob(mux.Vars(r)["id"])
+func (s *Server) handleTraceJob(w http.ResponseWriter, r *http.Request) {
+	j, ok := trace.GetJob(mux.Vars(r)["id"])
 	if !ok {
 		http.Error(w, "not found", 404)
 		return
@@ -819,8 +912,8 @@ func (s *Server) handleKeyPingJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, j)
 }
 
-
-func (s *Server) handleRkn(w http.ResponseWriter, r *http.Request) {	target := strings.TrimSpace(r.URL.Query().Get("target"))
+func (s *Server) handleRkn(w http.ResponseWriter, r *http.Request) {
+	target := strings.TrimSpace(r.URL.Query().Get("target"))
 	// принимают и host:port — порт отрезаем, РКН смотрит на домен/IP
 	if h, _, ok := strings.Cut(target, ":"); ok && !strings.Contains(h, "://") {
 		// осторожно с IPv6 — там двоеточий много
@@ -840,7 +933,8 @@ func (s *Server) handleRkn(w http.ResponseWriter, r *http.Request) {	target := s
 	writeJSON(w, res)
 }
 
-func (s *Server) handleExtJob(w http.ResponseWriter, r *http.Request) {	id := mux.Vars(r)["id"]
+func (s *Server) handleExtJob(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
 	j, ok := checkhost.GetJob(id)
 	if !ok {
 		http.Error(w, "not found", 404)

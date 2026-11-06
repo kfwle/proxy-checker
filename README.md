@@ -65,6 +65,16 @@ NO_BROWSER=1 ./bin/checker
 
 Настройки → тумблер (включено по умолчанию): раз в сутки качается `hookzof/socks5_list/proxy.txt` (лист кэшируется на сутки), прогоняется 3к строк со скользящим окном, живые — в `results/daily/YYYY-MM-DD/` + файлы по странам (`RU.txt`, …). Страна — только для живых, с вечным кэшем. Включение = сразу прогон 1к (если 0 живых — следующие чанки, с дедупом). `GET/POST /api/daily`, `POST /api/daily/run`.
 
+## Качество прокси: скорость, unlock, репутация IP
+
+Кнопка **Качество** на строке результата (или `POST /api/speed|/api/unlock|/api/reputation {link}`) — всё гоняется через сам прокси, тем же ядром, что и обычная проверка (для `http/socks` — напрямую):
+
+- **Скорость**: download 20 МБ / upload 5 МБ через `speed.cloudflare.com` (фолбэк `proof.ovh.net`), результат в Mbps. Размеры — `downBytes`/`upBytes` в запросе (кап 100/50 МБ).
+- **Unlock**: YouTube Premium, Netflix, ChatGPT (регион из `cdn-cgi/trace`), Spotify — вердикты `yes/no/unknown/error`; проверки идут параллельно.
+- **IP / DNSBL**: exit-IP (2ip, при 429 — ipify/icanhazip) и 8 keyless-блэклистов (Spamhaus ZEN, SpamCop, Barracuda, SORBS, PSBL, DroneBL, UCEPROTECT L1, JustSpam). `127.255.255.x` трактуется как «запрос заблокирован», а не листинг; IPv6-выход не проверяется.
+
+Одновременно выполняются не больше 4 quality-проверок (каждая поднимает ядро). `mtproto`/`webproxy` не поддерживают локальный туннель — для них quality недоступен.
+
 ## Ядра / автоскачивание
 
 Вкладка «Ядра»: статус, версии, кнопки «Скачать / Обновить» + «Скачать всё», прогресс в карточке. `mtproto-checker` без релизов — ставится через `go install @latest` (нужен Go), версионируется как `git-latest`. Проверка обновлений — сверка с GitHub releases, отключается в настройках.
@@ -91,6 +101,7 @@ NO_BROWSER=1 ./bin/checker
 - `POST /api/check {text|links, options}` → `{id,total}`; `GET /api/jobs/:id`; `GET /api/jobs/:id/stream` (SSE); `DELETE /api/jobs/:id`
 - `GET /api/cores`, `POST /api/cores/check-updates|download|download-all`, `GET /api/cores/progress`
 - `POST /api/extcheck {host, types?}`, `POST /api/gping|keyping {target}`, `GET /api/rkn?target=`, `POST /api/probe {target}`, `POST /api/exitip {link}`, `GET /api/revdns?ip=`
+- `POST /api/speed {link, downBytes?, upBytes?}`, `POST /api/unlock {link}`, `POST /api/reputation {link}` — качество через прокси
 - `POST /api/dnstest {host}`; `POST /api/dnscomp {target, ids?}`, `GET /api/dnscomp/:id`, резолверы: `GET|POST /api/dnscomp/resolvers`, `POST /api/dnscomp/resolvers/del`
 - `GET|POST /api/daily`, `POST /api/daily/run`, `GET|POST /api/settings` (2ip-токен, авто-abuse), `GET /api/geo/pool`, `GET /api/results`, `GET /api/results/download?file=`
 

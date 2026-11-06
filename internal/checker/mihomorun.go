@@ -319,27 +319,36 @@ func checkViaMihomo(ctx context.Context, link, targetURL string, timeout time.Du
 }
 
 func fetchViaMihomo(ctx context.Context, link, targetURL string, timeout time.Duration, discard bool) ([]byte, int64, string) {
+	port, cleanup, errStr := startMihomo(ctx, link, timeout)
+	if errStr != "" {
+		return nil, 0, errStr
+	}
+	defer cleanup()
+	return probeSocksURL(ctx, port, targetURL, timeout, !discard)
+}
+
+// startMihomo поднимает mihomo с mixed-port и прокси из ссылки.
+func startMihomo(ctx context.Context, link string, timeout time.Duration) (int, func(), string) {
 	bin, ok := mihomoBin()
 	if !ok {
-		return nil, 0, "ERR_NO_BINARY"
+		return 0, nil, "ERR_NO_BINARY"
 	}
 	pl, err := parseLink(link)
 	if err != nil {
-		return nil, 0, err.Error()
+		return 0, nil, err.Error()
 	}
 	proxy, err := buildMihomoProxy(pl)
 	if err != nil {
-		return nil, 0, err.Error()
+		return 0, nil, err.Error()
 	}
 	port, err := freePort()
 	if err != nil {
-		return nil, 0, err.Error()
+		return 0, nil, err.Error()
 	}
 	workdir, err := os.MkdirTemp("", "mihomo-*")
 	if err != nil {
-		return nil, 0, err.Error()
+		return 0, nil, err.Error()
 	}
-	defer os.RemoveAll(workdir)
 	cfg := "mixed-port: " + fmt.Sprintf("%d", port) + "\nlog-level: warning\nmode: rule\n" + yamlEmit(map[string]any{
 		"proxies": []any{proxy},
 		"proxy-groups": []any{map[string]any{
@@ -348,31 +357,40 @@ func fetchViaMihomo(ctx context.Context, link, targetURL string, timeout time.Du
 		"rules": []any{"MATCH,sel"},
 	}, 0)
 	if err := os.WriteFile(filepath.Join(workdir, "config.yaml"), []byte(cfg), 0o644); err != nil {
-		return nil, 0, err.Error()
+		os.RemoveAll(workdir)
+		return 0, nil, err.Error()
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, timeout+15*time.Second)
-	defer cancel()
+	cctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(cctx, bin, "-d", workdir, "-f", filepath.Join(workdir, "config.yaml"))
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return nil, 0, err.Error()
+		cancel()
+		os.RemoveAll(workdir)
+		return 0, nil, err.Error()
 	}
 	exited := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
 		close(exited)
 	}()
-	defer func() {
+	cleanup := func() {
 		_ = cmd.Process.Kill()
 		<-exited
-	}()
+		cancel()
+		os.RemoveAll(workdir)
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		select {
 		case <-exited:
-			return nil, 0, "mihomo упал на старте: " + lastLines(stderr.String(), 3)
+			msg := strings.TrimSpace(stderr.String())
+			cleanup()
+			if msg != "" {
+				return 0, nil, "mihomo упал на старте: " + lastLines(msg, 3)
+			}
+			return 0, nil, "mihomo упал на старте"
 		default:
 		}
 		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
@@ -383,12 +401,14 @@ func fetchViaMihomo(ctx context.Context, link, targetURL string, timeout time.Du
 		if time.Now().After(deadline) {
 			_ = cmd.Process.Kill()
 			<-exited
-			if s := strings.TrimSpace(stderr.String()); s != "" {
-				return nil, 0, "mihomo inbound не поднялся: " + lastLines(s, 3)
+			msg := strings.TrimSpace(stderr.String())
+			cleanup()
+			if msg != "" {
+				return 0, nil, "mihomo inbound не поднялся: " + lastLines(msg, 3)
 			}
-			return nil, 0, "mihomo inbound не поднялся за 10с"
+			return 0, nil, "mihomo inbound не поднялся за 10с"
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	return probeSocksURL(cctx, port, targetURL, timeout, !discard)
+	return port, cleanup, ""
 }

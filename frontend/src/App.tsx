@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Play, Square, Trash2, Download, Copy,
-  Cpu, RefreshCw, Settings2, Moon, Sun, Zap, Filter, FlaskConical,
+  Cpu, RefreshCw, Settings2, Moon, Sun, Zap, Filter, FlaskConical, Image,
 } from 'lucide-react'
 import { ResultRow } from './report'
 import TestPage from './TestPage'
@@ -629,6 +629,7 @@ export default function App() {
               <Btn onClick={exportAlive} icon={<Download size={13} />} label=".txt" />
               <Btn onClick={exportJSON} icon={<Download size={13} />} label=".json" />
               <Btn onClick={exportCSV} icon={<Download size={13} />} label=".csv" />
+              <Btn onClick={() => exportPNG(results)} icon={<Image size={13} />} label="PNG" />
             </div>
           </div>
           <div className="grid gap-1.5">
@@ -679,6 +680,86 @@ function Btn({ onClick, icon, label }: { onClick: () => void; icon: React.ReactN
       {icon} {label}
     </button>
   )
+}
+
+function trunc(s: string, n: number) {
+  return s.length > n ? s.slice(0, n - 1) + '…' : s
+}
+
+// exportPNG рисует сводку по результатам на canvas и отдаёт PNG-файл.
+// Без внешних библиотек: один файл, работает офлайн.
+function exportPNG(results: CheckResult[]) {
+  const rows = results.slice(0, 80)
+  const W = 1400, rowH = 34, headH = 150
+  const H = headH + rows.length * rowH + 70
+  const dpr = 2
+  const canvas = document.createElement('canvas')
+  canvas.width = W * dpr
+  canvas.height = H * dpr
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  ctx.scale(dpr, dpr)
+
+  ctx.fillStyle = '#fafaf9'
+  ctx.fillRect(0, 0, W, H)
+
+  ctx.fillStyle = '#1c1917'
+  ctx.font = 'bold 28px sans-serif'
+  ctx.fillText('Proxy Checker — отчёт', 40, 56)
+  const alive = results.filter((r) => r.alive).length
+  ctx.fillStyle = '#57534e'
+  ctx.font = '14px sans-serif'
+  ctx.fillText(`Всего: ${results.length} · живых: ${alive} · мёртвых: ${results.length - alive} · ${new Date().toLocaleString('ru-RU')}`, 40, 84)
+
+  ctx.fillStyle = '#78716c'
+  ctx.font = 'bold 12px monospace'
+  ctx.fillText('СТАТУС', 40, 122)
+  ctx.fillText('ПРОТОКОЛ', 130, 122)
+  ctx.fillText('ХОСТ', 260, 122)
+  ctx.fillText('МС', 940, 122)
+  ctx.fillText('ЯДРО', 1010, 122)
+  ctx.strokeStyle = '#e7e5e4'
+  ctx.beginPath()
+  ctx.moveTo(40, 132)
+  ctx.lineTo(W - 40, 132)
+  ctx.stroke()
+
+  rows.forEach((r, i) => {
+    const y = headH + i * rowH + 22
+    if (i % 2) {
+      ctx.fillStyle = '#f5f5f4'
+      ctx.fillRect(40, y - 26, W - 80, rowH)
+    }
+    ctx.fillStyle = r.alive ? '#10b981' : '#a8a29e'
+    ctx.beginPath()
+    ctx.arc(52, y - 5, 5, 0, Math.PI * 2)
+    ctx.fill()
+
+    ctx.font = '13px monospace'
+    ctx.fillStyle = '#292524'
+    ctx.fillText(r.protocol || '?', 130, y)
+    ctx.fillText(trunc(r.host || r.link, 78), 260, y)
+    ctx.textAlign = 'right'
+    ctx.fillText(r.alive ? String(r.latencyMs) : '—', 940, y)
+    ctx.textAlign = 'left'
+    ctx.fillStyle = '#78716c'
+    ctx.fillText(trunc(r.core, 16), 1010, y)
+  })
+
+  if (results.length > rows.length) {
+    ctx.fillStyle = '#78716c'
+    ctx.font = '13px sans-serif'
+    ctx.fillText(`… ещё ${results.length - rows.length} строк`, 40, headH + rows.length * rowH + 40)
+  }
+
+  canvas.toBlob((blob) => {
+    if (!blob) return
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = 'proxy-checker.png'
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(a.href), 3000)
+  }, 'image/png')
 }
 
 function download(name: string, content: string) {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -34,22 +33,33 @@ func checkViaSingBox(ctx context.Context, link string, testURL string, timeout t
 // через локальный socks-inbound. Возвращает тело (до 64К), пинг, ошибку.
 // discard=true — тело выкидывать (обычный чек), false — вернуть (exit-ip).
 func fetchViaSingBox(ctx context.Context, link string, targetURL string, timeout time.Duration, discard bool) ([]byte, int64, string) {
+	port, cleanup, errStr := startSingBox(ctx, link, timeout)
+	if errStr != "" {
+		return nil, 0, errStr
+	}
+	defer cleanup()
+	return probeSocksURL(ctx, port, targetURL, timeout, !discard)
+}
+
+// startSingBox поднимает sing-box с outbound из ссылки и socks-inbound на
+// свободном порту. Процесс живёт до cleanup() или отмены ctx.
+func startSingBox(ctx context.Context, link string, timeout time.Duration) (int, func(), string) {
 	bin := filepath.Join(cores.CoresDir(), "sing-box")
 	if _, err := os.Stat(bin); err != nil {
 		if _, err2 := os.Stat(bin + ".exe"); err2 != nil {
-			return nil, 0, "ERR_NO_BINARY"
+			return 0, nil, "ERR_NO_BINARY"
 		} else {
 			bin += ".exe"
 		}
 	}
 	outbound, err := buildSingBoxOutbound(link)
 	if err != nil {
-		return nil, 0, err.Error()
+		return 0, nil, err.Error()
 	}
 	// free local port
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return nil, 0, err.Error()
+		return 0, nil, err.Error()
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
@@ -64,14 +74,12 @@ func fetchViaSingBox(ctx context.Context, link string, targetURL string, timeout
 	}
 	tmp, err := os.CreateTemp("", "sb-*.json")
 	if err != nil {
-		return nil, 0, err.Error()
+		return 0, nil, err.Error()
 	}
-	defer os.Remove(tmp.Name())
 	_ = json.NewEncoder(tmp).Encode(cfg)
 	tmp.Close()
 
-	cctx, cancel := context.WithTimeout(ctx, timeout+15*time.Second)
-	defer cancel()
+	cctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(cctx, bin, "run", "-c", tmp.Name())
 	// stderr в буфер: если конфиг кривой, sing-box падает сразу —
 	// покажем его ошибку вместо глухого "inbound не поднялся"
@@ -79,7 +87,9 @@ func fetchViaSingBox(ctx context.Context, link string, targetURL string, timeout
 	cmd.Stderr = &stderr
 	cmd.Stdout = io.Discard
 	if err := cmd.Start(); err != nil {
-		return nil, 0, err.Error()
+		cancel()
+		os.Remove(tmp.Name())
+		return 0, nil, err.Error()
 	}
 	exited := make(chan struct{})
 	go func() {
@@ -88,16 +98,23 @@ func fetchViaSingBox(ctx context.Context, link string, targetURL string, timeout
 		_ = cmd.Wait()
 		close(exited)
 	}()
-	defer func() {
+	cleanup := func() {
 		_ = cmd.Process.Kill()
 		<-exited
-	}()
+		cancel()
+		os.Remove(tmp.Name())
+	}
 	// wait for socks inbound
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		select {
 		case <-exited:
-			return nil, 0, "sing-box упал на старте: " + lastLines(stderr.String(), 3)
+			msg := strings.TrimSpace(stderr.String())
+			cleanup()
+			if msg != "" {
+				return 0, nil, "sing-box упал на старте: " + lastLines(msg, 3)
+			}
+			return 0, nil, "sing-box упал на старте"
 		default:
 		}
 		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
@@ -108,34 +125,16 @@ func fetchViaSingBox(ctx context.Context, link string, targetURL string, timeout
 		if time.Now().After(deadline) {
 			_ = cmd.Process.Kill()
 			<-exited
-			if s := strings.TrimSpace(stderr.String()); s != "" {
-				return nil, 0, "sing-box inbound не поднялся: " + lastLines(s, 3)
+			msg := strings.TrimSpace(stderr.String())
+			cleanup()
+			if msg != "" {
+				return 0, nil, "sing-box inbound не поднялся: " + lastLines(msg, 3)
 			}
-			return nil, 0, "sing-box inbound не поднялся за 10с"
+			return 0, nil, "sing-box inbound не поднялся за 10с"
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	proxyURL, _ := url.Parse(fmt.Sprintf("socks5://127.0.0.1:%d", port))
-	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL), DialContext: (&net.Dialer{Timeout: timeout}).DialContext, TLSHandshakeTimeout: timeout}
-	client := &http.Client{Transport: transport, Timeout: timeout}
-	if targetURL == "" {
-		targetURL = "https://www.gstatic.com/generate_204"
-	}
-	start := time.Now()
-	req, _ := http.NewRequestWithContext(cctx, "GET", targetURL, nil)
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, 0, err.Error()
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if resp.StatusCode >= 500 {
-		return nil, 0, fmt.Sprintf("bad status %d", resp.StatusCode)
-	}
-	if discard {
-		return nil, time.Since(start).Milliseconds(), ""
-	}
-	return raw, time.Since(start).Milliseconds(), ""
+	return port, cleanup, ""
 }
 
 // lastLines возвращает последние n строк (sing-box пишет FATAL в конец).
