@@ -93,8 +93,15 @@ func singBoxLinks(obs []any) []string {
 		}
 	}
 	var out []string
+	seen := map[string]bool{} // защита от циклов selector A -> B -> A
 	var walk func(m map[string]any)
 	walk = func(m map[string]any) {
+		if tag, ok := m["tag"].(string); ok && tag != "" {
+			if seen[tag] {
+				return
+			}
+			seen[tag] = true
+		}
 		typ, _ := m["type"].(string)
 		switch typ {
 		case "selector", "urltest":

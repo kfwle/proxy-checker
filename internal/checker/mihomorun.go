@@ -10,8 +10,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"runtime"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -361,12 +361,12 @@ func fetchViaMihomo(ctx context.Context, link, targetURL string, timeout time.Du
 	}
 	exited := make(chan struct{})
 	go func() {
-		_, _ = cmd.Process.Wait()
+		_ = cmd.Wait()
 		close(exited)
 	}()
 	defer func() {
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		<-exited
 	}()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -381,6 +381,8 @@ func fetchViaMihomo(ctx context.Context, link, targetURL string, timeout time.Du
 			break
 		}
 		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			<-exited
 			if s := strings.TrimSpace(stderr.String()); s != "" {
 				return nil, 0, "mihomo inbound не поднялся: " + lastLines(s, 3)
 			}

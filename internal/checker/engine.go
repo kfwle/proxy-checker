@@ -39,7 +39,7 @@ type Options struct {
 	TimeoutSec  int        `json:"timeoutSec"`
 	TestURL     string     `json:"testUrl"`
 	Full        bool       `json:"full"`
-	Mode        string     `json:"mode"` // url | tcp | ping
+	Mode        string     `json:"mode"`  // url | tcp | ping
 	Cores       []string   `json:"cores"` // выбранные из sing-box/xray/mihomo (пусто = все)
 	Rules       []CoreRule `json:"rules"` // per-протокол/транспорт/защита -> ядро
 }
@@ -227,7 +227,12 @@ func checkDirect(ctx context.Context, link string, testURL string, timeout time.
 		port = strings.TrimSpace(port)
 		var lastErr string
 		for _, scheme := range []string{"http", "socks5"} {
-			proxyURL, _ := url.Parse(fmt.Sprintf("%s://%s:%s", scheme, host, port))
+			proxyURL, perr := url.Parse(fmt.Sprintf("%s://%s:%s", scheme, host, port))
+			if perr != nil || proxyURL.Hostname() == "" || proxyURL.Port() == "" {
+				// кривой host:port (опечатка, IPv6 без скобок) — не ходим напрямую
+				lastErr = "invalid host:port"
+				continue
+			}
 			ok, ms, errStr := fetchViaProxy(ctx, proxyURL, testURL, timeout)
 			if ok {
 				return true, ms, ""
@@ -322,7 +327,7 @@ func checkPing(ctx context.Context, host string, timeout time.Duration) (bool, i
 		if ms >= 0 {
 			return true, ms, ""
 		}
-		return false, 0, strings.TrimSpace(text)[:min(300, len(text))]
+		return false, 0, clip(text, 300)
 	}
 	if ms >= 0 {
 		return true, ms, ""
@@ -404,12 +409,22 @@ func checkViaMtproto(ctx context.Context, link string, timeout time.Duration, fu
 		if alive {
 			return true, 0, ""
 		}
-		return false, 0, strings.TrimSpace(string(out))[:min(300, len(out))]
+		return false, 0, clip(string(out), 300)
 	}
 	if len(arr) > 0 {
 		return true, 0, ""
 	}
 	return false, 0, "dead (mtproto-checker: no live)"
+}
+
+// clip обрезает текст ошибки до n байт уже ПОСЛЕ TrimSpace,
+// иначе срез по длине исходной строки выходит за границы.
+func clip(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) > n {
+		s = s[:n]
+	}
+	return s
 }
 
 func min(a, b int) int {

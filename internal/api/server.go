@@ -78,6 +78,7 @@ func (s *Server) sweepLoop() {
 		gping.Sweep(60 * time.Minute, 50)
 		keyping.Sweep(60 * time.Minute, 50)
 		dnscomp.Sweep(60 * time.Minute, 50)
+		trace.Sweep(60 * time.Minute, 50)
 	}
 }
 

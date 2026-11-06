@@ -374,14 +374,34 @@ func detectVersion(id CoreID, bin string) string {
 
 var versionRe = regexp.MustCompile(`\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?`)
 
+// кэш версий по mtime/размеру: Status() не должен запускать все бинарники
+// на каждый запрос /api/cores
+type diskVer struct {
+	mod  time.Time
+	size int64
+	ver  string
+}
+
+var (
+	diskVerMu    sync.Mutex
+	diskVerCache = map[CoreID]diskVer{}
+)
+
 func installedVersion(id CoreID, st os.FileInfo) string {
-	if v := detectVersion(id, binPath(id)); v != "" {
-		return v
+	diskVerMu.Lock()
+	cached, ok := diskVerCache[id]
+	diskVerMu.Unlock()
+	if ok && cached.size == st.Size() && cached.mod.Equal(st.ModTime()) {
+		return cached.ver
 	}
-	if v := loadVersions()[id]; v != "" {
-		return v
+	v := detectVersion(id, binPath(id))
+	if v == "" {
+		v = loadVersions()[id]
 	}
-	return ""
+	diskVerMu.Lock()
+	diskVerCache[id] = diskVer{mod: st.ModTime(), size: st.Size(), ver: v}
+	diskVerMu.Unlock()
+	return v
 }
 
 // GetAllProgress — снимок прогресса скачиваний.
@@ -652,7 +672,11 @@ func assetURL(id CoreID, tag string) string {
 	}
 	page := "https://github.com/" + s.repo + "/releases"
 	if s.goModule != "" {
-		return "https://" + strings.Replace(s.goModule, "github.com/", "github.com/", 1)
+		repo := s.goModule
+		if i := strings.Index(repo, "/cmd/"); i > 0 {
+			repo = repo[:i]
+		}
+		return "https://" + repo
 	}
 	if tag == "" || tag == "git-latest" {
 		return page

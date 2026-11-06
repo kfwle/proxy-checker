@@ -4,8 +4,10 @@ package checker
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -32,6 +34,12 @@ func parseLink(link string) (*parsedLink, error) {
 			return pl, nil
 		}
 		// иначе падаем в общий путь (может, открытая форма)
+	}
+	if strings.ToLower(u.Scheme) == "vmess" && (u.User == nil || u.Port() == "") {
+		// стандартная форма vmess://<base64-json>
+		if pl, err := parseVmessBase64(l); err == nil {
+			return pl, nil
+		}
 	}
 	if u.Host == "" {
 		return nil, fmt.Errorf("пустой host")
@@ -160,6 +168,74 @@ func parseSSLink(l string) (*parsedLink, error) {
 	return &parsedLink{Scheme: "ss", User: userinfo[:ci], Password: userinfo[ci+1:], Host: host, Port: port, Params: query, Raw: l}, nil
 }
 
+// parseVmessBase64 разбирает каноническую vmess://<base64-json> ссылку
+// (add/port/id/net/tls/host/path/sni) в общий parsedLink.
+func parseVmessBase64(l string) (*parsedLink, error) {
+	rest := strings.TrimPrefix(strings.TrimSpace(l), "vmess://")
+	if i := strings.IndexAny(rest, "#?"); i >= 0 {
+		rest = rest[:i]
+	}
+	dec, err := b64decode(rest)
+	if err != nil {
+		return nil, fmt.Errorf("vmess: не base64")
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(dec), &m); err != nil {
+		return nil, fmt.Errorf("vmess: не JSON")
+	}
+	str := func(k string) string {
+		switch v := m[k].(type) {
+		case string:
+			return strings.TrimSpace(v)
+		case float64:
+			return strconv.FormatInt(int64(v), 10)
+		}
+		return ""
+	}
+	host := str("add")
+	port := 0
+	fmt.Sscanf(str("port"), "%d", &port)
+	uuid := str("id")
+	if host == "" || port == 0 || uuid == "" {
+		return nil, fmt.Errorf("vmess: нет add/port/id")
+	}
+	q := url.Values{}
+	if v := str("scy"); v != "" {
+		q.Set("scy", v)
+	}
+	if v := str("aid"); v != "" {
+		q.Set("alterId", v)
+	}
+	netw := strings.ToLower(str("net"))
+	if netw == "" {
+		netw = "tcp"
+	}
+	q.Set("type", netw)
+	if v := str("host"); v != "" {
+		q.Set("host", v)
+	}
+	path := str("path")
+	if netw == "grpc" {
+		if path != "" {
+			q.Set("serviceName", path)
+		}
+	} else if path != "" {
+		q.Set("path", path)
+	}
+	if strings.EqualFold(str("tls"), "tls") {
+		q.Set("security", "tls")
+	}
+	if v := str("sni"); v != "" {
+		q.Set("sni", v)
+	}
+	if v := str("fp"); v != "" {
+		q.Set("fp", v)
+	}
+	if v := str("alpn"); v != "" {
+		q.Set("alpn", v)
+	}
+	return &parsedLink{Scheme: "vmess", User: uuid, Host: host, Port: port, Params: q, Raw: l}, nil
+}
 
 func looksB64(s string) bool {
 	if len(s) < 8 || len(s)%4 != 0 {

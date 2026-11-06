@@ -191,13 +191,13 @@ func runJuicity(ctx context.Context, link string, timeout time.Duration) (int, f
 	}
 	cleanup := func() {
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		_ = cmd.Wait()
 		cancel()
 		os.Remove(tmp.Name())
 	}
 	if !waitPort(localPort, 12*time.Second) {
-		msg := strings.TrimSpace(stderr.String())
 		cleanup()
+		msg := strings.TrimSpace(stderr.String())
 		if msg != "" {
 			return 0, nil, "juicity-client не поднялся: " + lastLines(msg, 3)
 		}

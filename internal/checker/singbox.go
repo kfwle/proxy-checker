@@ -83,12 +83,14 @@ func fetchViaSingBox(ctx context.Context, link string, targetURL string, timeout
 	}
 	exited := make(chan struct{})
 	go func() {
-		_, _ = cmd.Process.Wait()
+		// именно cmd.Wait, а не Process.Wait: закрывает pipe-горутины
+		// (иначе они утекают) и синхронизирует запись stderr
+		_ = cmd.Wait()
 		close(exited)
 	}()
 	defer func() {
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		<-exited
 	}()
 	// wait for socks inbound
 	deadline := time.Now().Add(10 * time.Second)
@@ -104,6 +106,8 @@ func fetchViaSingBox(ctx context.Context, link string, targetURL string, timeout
 			break
 		}
 		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			<-exited
 			if s := strings.TrimSpace(stderr.String()); s != "" {
 				return nil, 0, "sing-box inbound не поднялся: " + lastLines(s, 3)
 			}
@@ -184,6 +188,21 @@ func buildSingBoxOutbound(link string) (map[string]any, error) {
 			tls["insecure"] = true
 		}
 	}
+	// REALITY: без блока reality sing-box не пройдёт хендшейк (false dead)
+	if q.Get("security") == "reality" {
+		pbk := q.Get("pbk")
+		if pbk == "" {
+			pbk = q.Get("public_key")
+		}
+		if pbk != "" {
+			sid := q.Get("sid")
+			if sid == "" {
+				sid = q.Get("short_id")
+			}
+			tls["reality"] = map[string]any{"enabled": true, "public_key": pbk, "short_id": sid}
+			tls["utls"] = map[string]any{"enabled": true, "fingerprint": firstOr(q.Get("fp"), "chrome")}
+		}
+	}
 	switch scheme {
 	case "vless":
 		uuid := strings.TrimPrefix(u.User.String(), "//")
@@ -202,8 +221,21 @@ func buildSingBoxOutbound(link string) (map[string]any, error) {
 		return ob, nil
 	case "vmess":
 		// vmess://base64-json or vmess://uuid@host:port?params
-		if u.User == nil && u.Host != "" && !strings.Contains(u.Host, ".") && len(u.Host) > 20 {
-			return nil, fmt.Errorf("vmess base64-JSON пока разбирается только через sing-box GUI; вставьте ссылку вида vmess://uuid@host:port")
+		if pl, perr := parseVmessBase64(l); perr == nil {
+			vtls := map[string]any{"enabled": false}
+			sec := strings.ToLower(pl.q("security"))
+			if sec == "tls" || sec == "reality" || pl.Port == 443 {
+				vtls["enabled"] = true
+				vtls["server_name"] = pl.sni()
+				if pl.insecure() {
+					vtls["insecure"] = true
+				}
+			}
+			ob := map[string]any{"type": "vmess", "tag": "out", "server": pl.Host, "server_port": pl.Port, "uuid": pl.User, "security": firstOr(pl.q("scy"), "auto"), "tls": vtls}
+			if t := transportOf(pl.Params); t != nil {
+				ob["transport"] = t
+			}
+			return ob, nil
 		}
 		uuid := ""
 		if u.User != nil {
@@ -218,6 +250,10 @@ func buildSingBoxOutbound(link string) (map[string]any, error) {
 		// все формы (включая целиком base64) разбирает общий парсер
 		method, password := "aes-256-gcm", ""
 		if pl, perr := parseLink(l); perr == nil {
+			// у ss://<base64> url.Parse видит host как base64-блоб — берём из парсера
+			if pl.Host != "" && pl.Port > 0 {
+				host, p = pl.Host, pl.Port
+			}
 			if pl.User != "" {
 				method = pl.User
 			} else if v := q.Get("method"); v != "" {
@@ -272,7 +308,18 @@ func buildSingBoxOutbound(link string) (map[string]any, error) {
 		if q.Get("insecure") == "1" {
 			tls["insecure"] = true
 		}
-		return map[string]any{"type": "hysteria2", "tag": "out", "server": host, "server_port": p, "password": pw, "tls": tls}, nil
+		ob := map[string]any{"type": "hysteria2", "tag": "out", "server": host, "server_port": p, "password": pw, "tls": tls}
+		// obfs (salamander) — без него hy2 с obfs не поднимется
+		if ot := q.Get("obfs"); ot != "" {
+			obfs := map[string]any{"type": ot}
+			if op := q.Get("obfs-password"); op != "" {
+				obfs["password"] = op
+			} else if op := q.Get("obfs_password"); op != "" {
+				obfs["password"] = op
+			}
+			ob["obfs"] = obfs
+		}
+		return ob, nil
 	case "hysteria":
 		return map[string]any{"type": "hysteria", "tag": "out", "server": host, "server_port": p, "tls": tls}, nil
 	case "anytls":

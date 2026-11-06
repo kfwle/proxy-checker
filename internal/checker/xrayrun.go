@@ -209,8 +209,8 @@ func fetchViaXray(ctx context.Context, link, targetURL string, timeout time.Dura
 		return nil, 0, err.Error()
 	}
 	cfg := map[string]any{
-		"log":      map[string]any{"loglevel": "warning"},
-		"inbounds": []any{map[string]any{"protocol": "socks", "listen": "127.0.0.1", "port": port, "settings": map[string]any{"udp": false}}},
+		"log":       map[string]any{"loglevel": "warning"},
+		"inbounds":  []any{map[string]any{"protocol": "socks", "listen": "127.0.0.1", "port": port, "settings": map[string]any{"udp": false}}},
 		"outbounds": []any{outbound, map[string]any{"protocol": "freedom", "tag": "direct"}},
 	}
 	tmp, err := os.CreateTemp("", "xray-*.json")
@@ -232,12 +232,12 @@ func fetchViaXray(ctx context.Context, link, targetURL string, timeout time.Dura
 	}
 	exited := make(chan struct{})
 	go func() {
-		_, _ = cmd.Process.Wait()
+		_ = cmd.Wait()
 		close(exited)
 	}()
 	defer func() {
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		<-exited
 	}()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -252,6 +252,8 @@ func fetchViaXray(ctx context.Context, link, targetURL string, timeout time.Dura
 			break
 		}
 		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			<-exited
 			if s := strings.TrimSpace(stderr.String()); s != "" {
 				return nil, 0, "xray inbound не поднялся: " + lastLines(s, 3)
 			}
